@@ -26,6 +26,10 @@ main{display:grid;grid-template-columns:1.3fr 1fr;gap:12px;padding:0 18px 18px}
 .wl{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
 .w{border-radius:10px;padding:10px 12px;border:1px solid var(--line)}.w .k{font-size:13px;color:var(--mut)}.w .v{font-size:26px;font-weight:800}.w .d{font-size:12px;color:var(--mut)}
 .wy{background:rgba(22,199,132,.15);border-color:var(--up)}.wy .v{color:var(--up)}.wn{background:rgba(234,57,67,.15);border-color:var(--dn)}.wn .v{color:var(--dn)}
+#proj{padding:0 18px 12px}#proj h3{font-size:13px;color:var(--mut);margin:0 0 6px;font-weight:600}
+.pl{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.pc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.pc .h{color:var(--mut);font-size:12px}.pc .c{font-size:24px;font-weight:800;font-variant-numeric:tabular-nums}.pc .r{font-size:12px;color:var(--mut)}.pc .k{font-size:12px;margin-top:4px}
 canvas{width:100%;height:340px;display:block}
 #tape{height:340px;overflow:hidden;font:12px ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
 .row{display:grid;grid-template-columns:96px 80px 1fr 1fr;gap:6px;padding:1px 4px}
@@ -34,6 +38,7 @@ button{background:var(--line);color:var(--txt);border:0;border-radius:6px;paddin
 </style></head><body>
 <header><h1>BTC / USD spot · Kalshi index exchanges</h1><div id="avg">connecting…</div><div id="stats"></div><div id="roll" style="font-size:15px"></div><button id="pause">Pause tape</button></header>
 <div id="wins"><div class="in">Kalshi "above" strikes, separated by commas: <input id="strikes" inputmode="decimal" placeholder="e.g. 64500, 64750, 65000"></div><div class="wl" id="wl"></div></div>
+<div id="proj"><h3>Projections (estimate from recent trend and volatility, not a guarantee)</h3><div class="pl" id="pl"><div class="pc">warming up…</div></div></div>
 <div class="grid" id="grid"></div>
 <main>
  <div class="panel"><h2><span>Every trade, last 2 minutes (each dot is one trade)</span><span id="range"></span></h2><canvas id="chart"></canvas></div>
@@ -129,6 +134,31 @@ setInterval(()=>{const l=Object.values(st).map(s=>s.last).filter(x=>x!==null);if
  const ks=sk.value.split(/[ ,]+/).map(x=>parseFloat(x.replace(/[$]/g,''))).filter(x=>isFinite(x)&&x>0);
  document.getElementById('wl').innerHTML=ks.map(k=>{const y=proj>k,diff=proj-k;
   return `<div class="w ${y?'wy':'wn'}"><div class="k">Above $${fmt(k)}</div><div class="v">${y?'YES':'NO'} winning</div><div class="d">${diff>=0?'+':'−'}$${fmt(Math.abs(diff))} vs strike · live $${fmt(med)}${inWin?` · ${win.length}/60 sec of settlement minute locked in`:''}</div></div>`}).join('');
+},1000);
+
+// ---- projections ----
+const hist=[];// per-second median {t,p}
+let mins=[];// 1-min closes for volatility
+fetch('https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60').then(r=>r.json()).then(c=>{if(Array.isArray(c))mins=c.slice(0,120).reverse().map(x=>x[4])}).catch(()=>{});
+function phi(z){const t=1/(1+.2316419*Math.abs(z)),d=.3989423*Math.exp(-z*z/2),p=d*t*(.3193815+t*(-.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));return z>0?1-p:p}
+setInterval(()=>{const l=Object.values(st).map(s=>s.last).filter(x=>x!==null);if(!l.length)return;
+ const so=[...l].sort((a,b)=>a-b),mi=so.length>>1,med=so.length%2?so[mi]:(so[mi-1]+so[mi])/2;const now=Date.now();
+ hist.push({t:now,p:med});while(hist.length&&hist[0].t<now-1800000)hist.shift();
+ if(hist.length>=60&&now-(window._lm||0)>=60000){window._lm=now;mins.push(med);if(mins.length>180)mins.shift()}
+ // volatility per minute (log returns)
+ let rets=[];for(let i=1;i<mins.length;i++)rets.push(Math.log(mins[i]/mins[i-1]));
+ let sig;if(rets.length>=10){const m=rets.reduce((a,b)=>a+b,0)/rets.length;sig=Math.sqrt(rets.reduce((a,b)=>a+(b-m)**2,0)/(rets.length-1))}
+ else if(hist.length>=30){const r=[];for(let i=1;i<hist.length;i++)r.push(Math.log(hist[i].p/hist[i-1].p));const m=r.reduce((a,b)=>a+b,0)/r.length;sig=Math.sqrt(r.reduce((a,b)=>a+(b-m)**2,0)/r.length*60)}
+ else return;
+ // trend: regression slope over last 5 min, per minute, damped
+ const w=hist.filter(h=>h.t>=now-300000);let slope=0;
+ if(w.length>=20){const n=w.length,xs=w.map(h=>(h.t-now)/60000),ys=w.map(h=>h.p),mx=xs.reduce((a,b)=>a+b)/n,my=ys.reduce((a,b)=>a+b)/n;
+  let num=0,den=0;for(let i=0;i<n;i++){num+=(xs[i]-mx)*(ys[i]-my);den+=(xs[i]-mx)**2}slope=den?num/den:0}
+ const ks=document.getElementById('strikes').value.split(/[ ,]+/).map(x=>parseFloat(x.replace(/[$]/g,''))).filter(x=>isFinite(x)&&x>0);
+ document.getElementById('pl').innerHTML=[3,9,15].map(h=>{const c=med+slope*h*0.5,sd=med*sig*Math.sqrt(h);
+  const at=new Date(now+h*60000).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+  const kk=ks.map(k=>{const pr=1-phi((k-c)/sd);return `<div class="k" style="color:${pr>=.5?'var(--up)':'var(--dn)'}">Above $${fmt(k)}: ${Math.round(pr*100)}% chance</div>`}).join('');
+  return `<div class="pc"><div class="h">In ${h} min (${at})</div><div class="c">$${fmt(c)}</div><div class="r">likely range $${fmt(c-sd)} – $${fmt(c+sd)} · trend ${slope>=0?'+':'−'}$${fmt(Math.abs(slope))}/min</div>${kk}</div>`}).join('');
 },1000);
 requestAnimationFrame(frame);
 </script></body></html>
