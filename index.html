@@ -1,0 +1,134 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC Live Tape</title>
+<style>
+:root{--bg:#0b0e13;--card:#141922;--line:#222a36;--txt:#e6e9ef;--mut:#8a94a6;--up:#16c784;--dn:#ea3943}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:14px -apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:baseline;gap:16px;padding:14px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+h1{font-size:16px;margin:0;color:var(--mut);font-weight:600}
+#avg{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+#stats{color:var(--mut);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;padding:12px 18px}
+.ex{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;transition:background .15s}
+.ex .n{display:flex;justify-content:space-between;color:var(--mut);font-size:12px}
+.ex .p{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin:4px 0}
+.ex .s{font-size:11px;color:var(--mut)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#666;margin-left:6px}
+.on{background:var(--up)}.off{background:var(--dn)}
+.fu{background:rgba(22,199,132,.18)}.fd{background:rgba(234,57,67,.18)}
+main{display:grid;grid-template-columns:1.3fr 1fr;gap:12px;padding:0 18px 18px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0}
+.panel h2{font-size:12px;color:var(--mut);margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between}
+#roll b{font-size:24px;color:#facc15}#cd{color:var(--mut);font-size:12px}
+#wins{padding:0 18px 12px}#wins .in{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;color:var(--mut);font-size:13px}
+#wins input{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:16px;width:260px}
+.wl{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.w{border-radius:10px;padding:10px 12px;border:1px solid var(--line)}.w .k{font-size:13px;color:var(--mut)}.w .v{font-size:26px;font-weight:800}.w .d{font-size:12px;color:var(--mut)}
+.wy{background:rgba(22,199,132,.15);border-color:var(--up)}.wy .v{color:var(--up)}.wn{background:rgba(234,57,67,.15);border-color:var(--dn)}.wn .v{color:var(--dn)}
+canvas{width:100%;height:340px;display:block}
+#tape{height:340px;overflow:hidden;font:12px ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.row{display:grid;grid-template-columns:96px 80px 1fr 1fr;gap:6px;padding:1px 4px}
+.b{color:var(--up)}.r{color:var(--dn)}.big{font-weight:700;background:rgba(255,255,255,.06)}
+button{background:var(--line);color:var(--txt);border:0;border-radius:6px;padding:4px 10px;cursor:pointer}
+</style></head><body>
+<header><h1>BTC / USD spot · Kalshi index exchanges</h1><div id="avg">connecting…</div><div id="stats"></div><div id="roll" style="font-size:15px"></div><button id="pause">Pause tape</button></header>
+<div id="wins"><div class="in">Kalshi "above" strikes, separated by commas: <input id="strikes" inputmode="decimal" placeholder="e.g. 64500, 64750, 65000"></div><div class="wl" id="wl"></div></div>
+<div class="grid" id="grid"></div>
+<main>
+ <div class="panel"><h2><span>Every trade, last 2 minutes (each dot is one trade)</span><span id="range"></span></h2><canvas id="chart"></canvas></div>
+ <div class="panel"><h2><span>Trade tape (newest on top, ms timestamps)</span><span id="tps"></span></h2><div id="tape"></div></div>
+</main>
+<script>
+const EX=[
+ {id:'coinbase',name:'Coinbase',url:'wss://ws-feed.exchange.coinbase.com',sub:{type:'subscribe',product_ids:['BTC-USD'],channels:['matches']},
+  parse:m=>m.type==='match'?[{p:+m.price,q:+m.size,side:m.side==='sell'?'buy':'sell',t:Date.parse(m.time)}]:[]},
+ {id:'kraken',name:'Kraken',url:'wss://ws.kraken.com/v2',sub:{method:'subscribe',params:{channel:'trade',symbol:['BTC/USD']}},
+  parse:m=>m.channel==='trade'&&m.type==='update'?m.data.map(d=>({p:+d.price,q:+d.qty,side:d.side,t:Date.parse(d.timestamp)})):[]},
+ {id:'bitstamp',name:'Bitstamp',url:'wss://ws.bitstamp.net',sub:{event:'bts:subscribe',data:{channel:'live_trades_btcusd'}},
+  parse:m=>m.event==='trade'?[{p:+m.data.price,q:+m.data.amount,side:m.data.type===0?'buy':'sell',t:Math.floor(+m.data.microtimestamp/1000)}]:[]},
+ {id:'gemini',name:'Gemini',url:'wss://api.gemini.com/v1/marketdata/BTCUSD?trades=true&bids=false&offers=false&heartbeat=true',sub:null,
+  parse:m=>m.type==='update'?(m.events||[]).filter(e=>e.type==='trade').map(e=>({p:+e.price,q:+e.amount,side:e.makerSide==='ask'?'buy':'sell',t:m.timestampms||Date.now()})):[]},
+ {id:'cryptocom',name:'Crypto.com',url:'wss://stream.crypto.com/exchange/v1/market',sub:{id:1,method:'subscribe',params:{channels:['trade.BTC_USD']}},
+  hb:(m,ws)=>{if(m.method==='public/heartbeat')ws.send(JSON.stringify({id:m.id,method:'public/respond-heartbeat'}))},
+  parse:m=>m.result&&m.result.channel==='trade'?m.result.data.map(d=>({p:+d.p,q:+d.q,side:d.s==='BUY'?'buy':'sell',t:+d.t})):[]},
+];
+const COL={cryptocom:'#ec4899',coinbase:'#3b82f6',kraken:'#8b5cf6',bitstamp:'#22c55e',gemini:'#06b6d4',binanceus:'#f59e0b',binance:'#eab308',okx:'#e5e7eb',bybit:'#f97316'};
+const st={};const trades=[];let pending=[];let paused=false;let count=0;
+const grid=document.getElementById('grid');
+for(const e of EX){st[e.id]={last:null,n:0,el:null};const d=document.createElement('div');d.className='ex';
+ d.innerHTML=`<div class="n"><span style="color:${COL[e.id]}">● ${e.name}</span><span class="dot" id="d_${e.id}"></span></div><div class="p" id="p_${e.id}">—</div><div class="s" id="s_${e.id}">connecting</div>`;
+ grid.appendChild(d);st[e.id].el=d;connect(e,0);}
+function connect(e,tries){
+ const ws=new WebSocket(e.url);let pi;
+ ws.onopen=()=>{dot(e.id,'on');if(e.sub)setTimeout(()=>ws.readyState===1&&ws.send(JSON.stringify(e.sub)),e.id==="cryptocom"?1000:0);if(e.ping)pi=setInterval(()=>ws.readyState===1&&ws.send(e.ping),20000);tries=0;};
+ ws.onmessage=ev=>{let m;try{m=JSON.parse(ev.data)}catch{return}if(e.hb)e.hb(m,ws);let r=[];try{r=e.parse(m)}catch{}
+  for(const t of r){if(!isFinite(t.p))continue;t.ex=e.id;t.rx=Date.now();pending.push(t);}};
+ ws.onclose=()=>{clearInterval(pi);dot(e.id,'off');document.getElementById('s_'+e.id).textContent='reconnecting… (may be blocked in your region)';
+  setTimeout(()=>connect(e,tries+1),Math.min(30000,1000*2**tries));};
+ ws.onerror=()=>{};
+}
+function dot(id,c){document.getElementById('d_'+id).className='dot '+c}
+const fmt=n=>n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+function ts(t){const d=new Date(t);return d.toLocaleTimeString('en-US',{hour12:false})+'.'+String(d.getMilliseconds()).padStart(3,'0')}
+const tape=document.getElementById('tape');
+document.getElementById('pause').onclick=function(){paused=!paused;this.textContent=paused?'Resume tape':'Pause tape'};
+function frame(){
+ if(pending.length){const batch=pending;pending=[];count+=batch.length;
+  batch.sort((a,b)=>a.t-b.t);
+  for(const t of batch){const s=st[t.ex];const prev=s.last;s.last=t.p;s.n++;trades.push(t);
+   const pe=document.getElementById('p_'+t.ex);pe.textContent='$'+fmt(t.p);
+   if(prev!==null&&t.p!==prev){s.el.classList.remove('fu','fd');void s.el.offsetWidth;s.el.classList.add(t.p>prev?'fu':'fd');}
+   document.getElementById('s_'+t.ex).textContent=`${ts(t.t)} · ${t.q.toFixed(5)} BTC`;}
+  if(!paused){const frag=document.createDocumentFragment();
+   for(const t of batch.slice(-60)){const r=document.createElement('div');const usd=t.p*t.q;
+    r.className='row '+(t.side==='buy'?'b':'r')+(usd>=100000?' big':'');
+    r.innerHTML=`<span>${ts(t.t)}</span><span style="color:${COL[t.ex]}">${EX.find(x=>x.id===t.ex).name.split(' ')[0]}</span><span>$${fmt(t.p)}</span><span>${t.q.toFixed(5)} ($${Math.round(usd).toLocaleString()})</span>`;
+    frag.prepend(r);}
+   tape.prepend(frag);while(tape.children.length>120)tape.lastChild.remove();}
+  const lasts=Object.values(st).map(s=>s.last).filter(x=>x!==null);
+  if(lasts.length){const so=[...lasts].sort((a,b)=>a-b),mi=so.length>>1,avg=so.length%2?so[mi]:(so[mi-1]+so[mi])/2;document.getElementById('avg').textContent='$'+fmt(avg);
+   document.getElementById('stats').textContent=`median of ${lasts.length} exchanges (rough stand-in for the CF Benchmarks index) · spread $${fmt(Math.max(...lasts)-Math.min(...lasts))}`;}
+ }
+ const cut=Date.now()-120000;while(trades.length&&trades[0].rx<cut)trades.shift();
+ draw();requestAnimationFrame(frame);
+}
+let lastSec=0;setInterval(()=>{document.getElementById('tps').textContent=`${count-lastSec} trades/sec`;lastSec=count},1000);
+const cv=document.getElementById('chart'),cx=cv.getContext('2d');
+function draw(){const dpr=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+ if(cv.width!==W*dpr){cv.width=W*dpr;cv.height=H*dpr}cx.setTransform(dpr,0,0,dpr,0,0);cx.clearRect(0,0,W,H);
+ if(trades.length<2)return;const now=Date.now(),t0=now-120000;let lo=Infinity,hi=-Infinity;
+ for(const t of trades){if(t.p<lo)lo=t.p;if(t.p>hi)hi=t.p}const pad=Math.max(5,(hi-lo)*.08);lo-=pad;hi+=pad;
+ const L=70,x=t=>L+(t-t0)/120000*(W-L-6),y=p=>6+(hi-p)/(hi-lo)*(H-24);
+ cx.fillStyle='#8a94a6';cx.font='11px sans-serif';cx.strokeStyle='#222a36';
+ for(let i=0;i<=4;i++){const p=lo+(hi-lo)*i/4;cx.beginPath();cx.moveTo(L,y(p));cx.lineTo(W,y(p));cx.stroke();cx.fillText('$'+fmt(p).slice(0,-3),2,y(p)+4)}
+ cx.fillText('-2m',L,H-4);cx.fillText('now',W-28,H-4);
+ for(const t of trades){cx.fillStyle=COL[t.ex];const r=Math.min(6,1.5+Math.sqrt(t.q)*3);cx.beginPath();cx.arc(x(Math.min(t.rx,now)),y(t.p),r,0,7);cx.fill()}
+ document.getElementById('range').textContent=`${trades.length} trades`;
+}
+
+const secs=[];
+setInterval(()=>{const l=Object.values(st).map(s=>s.last).filter(x=>x!==null);if(!l.length)return;
+ const so=[...l].sort((a,b)=>a-b),mi=so.length>>1,med=so.length%2?so[mi]:(so[mi-1]+so[mi])/2;
+ secs.push(med);if(secs.length>60)secs.shift();
+ const avg=secs.reduce((a,b)=>a+b,0)/secs.length;const d=new Date();
+ const toHr=3600-(d.getMinutes()*60+d.getSeconds()),m=Math.floor(toHr/60),s=toHr%60;
+ const toQ=900-((d.getMinutes()%15)*60+d.getSeconds());
+ document.getElementById('roll').innerHTML=`60-sec avg (Kalshi-style): <b>$${fmt(avg)}</b> <span id="cd">${secs.length<60?`(warming up ${secs.length}/60s) `:''}· next hour in ${m}:${String(s).padStart(2,'0')} · next 15-min in ${Math.floor(toQ/60)}:${String(toQ%60).padStart(2,'0')}${toHr<=60?' · SETTLEMENT WINDOW NOW':''}</span>`;
+},1000);
+
+const sk=document.getElementById('strikes');sk.value=localStorage.getItem('strikes')||'';sk.oninput=()=>localStorage.setItem('strikes',sk.value);
+const win=[];// samples inside current settlement minute
+setInterval(()=>{const l=Object.values(st).map(s=>s.last).filter(x=>x!==null);if(!l.length)return;
+ const so=[...l].sort((a,b)=>a-b),mi=so.length>>1,med=so.length%2?so[mi]:(so[mi-1]+so[mi])/2;
+ const d=new Date();const inWin=d.getMinutes()===59;
+ if(inWin){if(d.getSeconds()===0)win.length=0;win.push(med)}else if(d.getMinutes()===0&&d.getSeconds()<2){}else win.length=0;
+ const roll=secs.length?secs.reduce((a,b)=>a+b,0)/secs.length:med;
+ const lock=win.length?win.reduce((a,b)=>a+b,0)/win.length:null;
+ const proj=lock!==null?(lock*win.length+med*(60-win.length))/60:roll;
+ const ks=sk.value.split(/[ ,]+/).map(x=>parseFloat(x.replace(/[$]/g,''))).filter(x=>isFinite(x)&&x>0);
+ document.getElementById('wl').innerHTML=ks.map(k=>{const y=proj>k,diff=proj-k;
+  return `<div class="w ${y?'wy':'wn'}"><div class="k">Above $${fmt(k)}</div><div class="v">${y?'YES':'NO'} winning</div><div class="d">${diff>=0?'+':'−'}$${fmt(Math.abs(diff))} vs strike · live $${fmt(med)}${inWin?` · ${win.length}/60 sec of settlement minute locked in`:''}</div></div>`}).join('');
+},1000);
+requestAnimationFrame(frame);
+</script></body></html>
